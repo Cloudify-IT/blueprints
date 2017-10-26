@@ -1,0 +1,170 @@
+tosca_definitions_version: cloudify_dsl_1_3
+
+description: >
+  This blueprint uses the cloudify Ansible (SSH) plugin to install a
+  Cloudify Vault application. It uses AWS as the infrastructre
+  and Uses Ansible to update and deploy the application code
+
+imports:
+  - http://www.getcloudify.org/spec/cloudify/3.4rc1/types.yaml
+  - http://www.getcloudify.org/spec/aws-plugin/1.4/plugin.yaml
+  - http://www.getcloudify.org/spec/fabric-plugin/1.4.1/plugin.yaml
+  - types/vault-types.yaml
+
+inputs:
+
+  ssh_user:
+    type: string
+    default: 'ubuntu'
+
+  aws_access_key_id:
+    type: string
+    default: ''
+
+  aws_secret_access_key:
+    type: string
+    default: ''
+
+  ec2_region_name:
+    type: string
+    default: ''
+
+  use_existing_security_group_for_vault:
+    type: boolean
+    default: false
+
+  vault_security_group_id:
+    type: string
+    default: ''
+
+  use_existing_keypair:
+    type: boolean
+    default: true
+
+  keypair_name:
+    type: string
+    default: cloudify-prod_ire
+
+  ssh_key_filename:
+    type: string
+    default: ~/.ssh/cloudify-prod_ire.pem
+
+  use_existing_server_for_vault:
+    type: boolean
+    default: false
+
+  vault_server_id:
+    type: string
+    default: ''
+
+  vault_server_image_id:
+    type: string
+    default: ''
+
+  vault_server_instance_type:
+    type: string
+    default: ''
+
+  use_existing_ip_for_vault:
+    type: boolean
+    default: true
+
+  vault_server_ip:
+    type: string
+    default: ''
+
+  vault_download_url:
+    type: string
+    default: ''
+
+  vault_s3_access_key:
+    type: string
+    default: ''
+
+  vault_s3_secret_key:
+    type: string
+    default: ''
+
+  logentries_token:
+    type: string
+    default: ''
+
+dsl_definitions:
+  aws_config: &AWS_CONFIG
+    aws_access_key_id: { get_input: aws_access_key_id }
+    aws_secret_access_key: { get_input: aws_secret_access_key }
+    ec2_region_name: { get_input: ec2_region_name }
+
+  fabric_env: &manager_fabric_env
+    user: { get_input: ssh_user }
+    key_filename: { get_property: [keypair, private_key_path] }
+    host_string: { get_attribute: [vault_server_ip, aws_resource_id] }
+
+node_templates:
+
+  vault_server_ip:
+    type: cloudify.aws.nodes.ElasticIP
+    properties:
+      aws_config: *AWS_CONFIG
+      use_external_resource: { get_input: use_existing_ip_for_vault}
+      resource_id: { get_input: vault_server_ip }
+
+  vault_host:
+    type: cloudify.aws.nodes.Instance
+    properties:
+      aws_config: *AWS_CONFIG
+      use_external_resource: { get_input: use_existing_server_for_vault }
+      resource_id: { get_input: vault_server_id }
+      install_agent: false
+      image_id: { get_input: vault_server_image_id }
+      instance_type: { get_input: vault_server_instance_type }
+    relationships:
+      - target: keypair
+        type: cloudify.aws.relationships.instance_connected_to_keypair
+      - target: vault_server_ip
+        type: cloudify.aws.relationships.instance_connected_to_elastic_ip
+      - target: vault_security_group
+        type: cloudify.aws.relationships.instance_connected_to_security_group
+
+  keypair:
+    type: cloudify.aws.nodes.KeyPair
+    properties:
+      aws_config: *AWS_CONFIG
+      use_external_resource: { get_input: use_existing_keypair }
+      resource_id: { get_input: keypair_name }
+      private_key_path: { get_input: ssh_key_filename }
+
+  vault_security_group:
+    type: cloudify.aws.nodes.SecurityGroup
+    properties:
+      aws_config: *AWS_CONFIG
+      use_external_resource: { get_input: use_existing_security_group_for_vault }
+      resource_id: { get_input: vault_security_group_id }
+      description: Security group for Vault VMs
+      rules:
+        - ip_protocol: tcp
+          from_port: 22
+          to_port: 22
+          cidr_ip: 0.0.0.0/0 
+        - ip_protocol: tcp
+          from_port: 8200
+          to_port: 8200
+          cidr_ip: 0.0.0.0/0 
+
+  vault:
+    type: vault.nodes
+    properties:
+      vault_url: { get_input: vault_download_url }
+      vault_access_key: { get_input: vault_s3_access_key }
+      vault_secret_key: { get_input: vault_s3_secret_key }
+      le_token: { get_input: logentries_token }
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          implementation: fabric.fabric_plugin.tasks.run_script
+          inputs:
+            script_path: scripts/start.sh
+            fabric_env: *manager_fabric_env
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: vault_host
